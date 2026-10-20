@@ -1,0 +1,12 @@
+# Large binaries — download with the commands in README.md
+bin/
+models/
+out/
+SHA256SUMS.txt
+
+# The reference voice is personal; the copy in audio/ is the test material.
+ref/
+
+# Local helper scripts
+.DS_Store
+Drama3_testklipp small/
