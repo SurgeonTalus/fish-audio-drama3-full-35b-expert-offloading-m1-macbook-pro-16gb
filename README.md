@@ -264,6 +264,66 @@ The runtime exposes the model as a built-in package preset named
 
 ---
 
+## Comparison with an M3 Ultra (MLX)
+
+[drama3-mac](https://github.com/JordiPosthumus/drama3-mac) by Jordi Posthumus is
+a separate **MLX** port of Drama 3 with strong results on an **M3 Ultra with
+512 GB unified memory**. It uses Apple's own framework instead of GGUF/ggml, and
+the model is **fully resident** in RAM.
+
+| | **M3 Ultra + MLX**<br>(drama3-mac) | **M1 Pro 16 GB + audio.cpp**<br>(this report) |
+|---|---|---|
+| Model | Drama 3 full, experts at 4 bit | Drama 3 full, Q4_K_S |
+| Runtime | MLX (native Apple) | audio.cpp (GGUF / ggml) |
+| Model in RAM | **Fully resident**, 27.3 GB peak RSS | **Disk-offloaded**, 6.9 GB peak |
+| Disk read per 33 s | 0 | **351 GB** |
+| **Steady-state RTF** | **0.68** | **28.8** |
+| Decode | 31.4 frames/s (21.5 needed for real time) | ~1.07 s/frame |
+| Prefill | ~1.9 s for a 31-row prompt | 50.1 s for 176,000 routed rows |
+
+**The speed gap is ~42x** (28.8 vs 0.68 RTF) — but it comes from the
+**settings and the hardware**, not from the model:
+
+1. **The model is fully resident on the M3 Ultra.** With 512 GB of RAM there is
+   no reason to stream experts from disk. On a 16 GB machine, disk offloading
+   is **forced** — the only way to run a 21.78 GiB model at all — and it is why
+   351 GB of disk reads is 75 % of wall time.
+2. **The M3 Ultra has far more memory bandwidth** — roughly 800 GB/s against
+   roughly 200 GB/s for the M1 Pro. Drama 3 decode is memory-bandwidth-bound.
+3. **MLX is Apple's own framework.** It uses `mx.compile` with explicitly
+   threaded per-layer caches, removing CPU dispatch overhead. ggml has more
+   general code paths.
+4. **Different backbone quantisation.** drama3-mac keeps the projections in
+   **bf16** — as the official FP8 release does — and quantises only the
+   experts. The Q4_K_S package also quantises the backbone. drama3-mac
+   therefore has both higher fidelity and higher speed.
+5. **Decode is kernel-launch-bound, not bandwidth-bound**, in drama3-mac:
+   ~1,500 small Metal kernels per step. Their own analysis shows the ~7 GB of
+   weights read per step would take ~9 ms at peak bandwidth. On the M1 Pro the
+   same work takes 1,070 ms, because each step must fetch experts from disk.
+
+**Conclusion:** on an M3 Ultra with enough RAM, drama3-mac is clearly the
+faster route. On a 16 GB Mac that alternative does not exist — the model cannot
+stay resident, so disk offloading is not an optimisation but a necessity. With
+512 GB RAM and a dedicated SSD, the *same* audio.cpp setup can use
+`disk_experts=false` and reach fully resident speed.
+
+### Findings worth borrowing from drama3-mac
+
+- **A 30-second multi-take reference** holds the voice better than a single
+  short clip. Measured: cosine similarity 0.939 versus 0.895 for a single
+  4-second take.
+- **"Cool" sampling for narration, "hot" for emotional peaks.**
+  `temperature 0.7, top_p 0.85` for calm text, `temperature 0.8, top_p 0.9`
+  for emotional passages.
+- **Never quantise the projections.** It produces fluent gibberish, because
+  the noise compounds across 40 layers. drama3-mac guards against this
+  explicitly.
+- **Acceptance bar:** a clip counts as good only if Whisper transcribes it
+  back to the prompt. This report used the same method.
+
+---
+
 ## Sample audio
 
 | File | What it is | Duration |
@@ -310,6 +370,7 @@ All 44.1 kHz mono PCM 16-bit.
 - [`drama-3-backbone-4bit-experts-Q4_K_S.gguf`](https://huggingface.co/Jmica/Drama-3-GGUF) — JarodMica (independent community conversion)
 - [`drama3-small-IQ3_XXS.gguf`](https://huggingface.co/pentacoxian-dev/drama3-small-GGUF) — JarodMica
 - [audio.cpp](https://github.com/0xShug0/audio.cpp) — the runtime, including the disk-backed expert offloading in PR #927
+- [drama3-mac](https://github.com/JordiPosthumus/drama3-mac) — the MLX port by Jordi Posthumus, used as the M3 Ultra reference point in the speed comparison above
 
 ## Licensing
 
