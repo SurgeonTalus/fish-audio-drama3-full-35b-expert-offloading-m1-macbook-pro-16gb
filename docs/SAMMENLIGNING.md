@@ -1,5 +1,39 @@
 # Sammenligning: Drama 3 vs CosyVoice3 vs Chatterbox v3
 
+> ## ⚠️ Correction notice
+>
+> The WER figures below were measured with a setup that had two defects,
+> both found and fixed after the fact:
+>
+> 1. **The reference text was longer than the reference audio.** The
+>    8-second reference clip contains three sentences; we passed four (or
+>    six) to the model. Drama 3 takes the accent from the reference
+>    *audio*, so inconsistent conditioning produced exactly the symptom
+>    we had attributed to quantization.
+> 2. **The measuring tool was too weak.** Whisper `small` with Norwegian
+>    forced has so much noise that the same model scored 18.2 % and
+>    36.4 % depending on the reference text. We now use
+>    `NbAiLab/nb-wav2vec2-1b-bokmaal`, a Norwegian ASR with 6.33 % WER on
+>    Norwegian reference material.
+>
+> **Re-measured with the corrected setup** (same text, same reference
+> voice, same seed, Norwegian ASR, ordinary Norwegian sentence):
+>
+> | Model | File | Norwegian WER | RTF |
+> |---|---|---|---|
+> | Drama 3 Q2_K | 15.88 GiB | **6.1 %** | 14.4 |
+> | Drama 3 Q3_K_S | 18.93 GiB | **9.1 %** | **22.8** |
+> | Drama 3 Q3_K_S, cache 64 | 18.93 GiB | 9.1 % | **21.5** |
+> | Drama 3 Q4_K_S | 21.78 GiB | 12.1 % | 26.3 |
+>
+> The differences are one or two words out of thirty-two — noise, not
+> quality. **Q2_K, Q3_K_S and Q4_K_S are equally intelligible in Norwegian.**
+> The earlier claim that Q2_K was "worse" measured accent, not
+> intelligibility, and was partly an artefact of the broken setup.
+>
+> The old numbers are kept below for the record. **Do not read them as
+> quality verdicts.**
+
 Tre modeller testet på **samme maskin**, med **samme tekst**, **samme
 referanseklipp** og **samme seed**.
 
@@ -229,11 +263,80 @@ Norwegian, and not what you want when you want English.
 
 ---
 
+## The expert cache: the setting that mattered most
+
+Every RTF figure in this report was measured with `expert_cache_size=8` —
+exactly the size of one token's expert set, because `num_experts_per_tok` is 8.
+With only 8 slots, any token that picks a different combination forces a
+disk read.
+
+Re-measuring the same model, same text and same seed with only the cache
+size changed:
+
+| `expert_cache_size` | Hit rate | Expert loads | Bytes read | **RTF** |
+|---|---|---|---|---|
+| 8 | 20.0 % | 63 048 | 111.6 GB | 44.2 |
+| 16 | 30.0 % | 55 684 | 98.5 GB | **27.4** |
+| 32 | 40.0 % | 46 403 | 82.1 GB | **26.4** |
+| 64 | 50.0 % | 34 873 | 61.7 GB | **21.3** |
+
+**RTF 44.2 → 21.3 (−52 %) and 45 % less disk traffic, without touching the
+model.** No new quantization, no new code — one option.
+
+### What it costs in RAM
+
+One expert per layer is three projections of 2048 × 512 elements.
+
+| Profile | per expert per layer | cache 64 | cache 96 | cache 128 |
+|---|---|---|---|---|
+| Q4_K_S (4-bit dense) | 1.69 MB | 4.22 GB | 6.33 GB | 8.44 GB |
+| **Q3_K_S (8-bit dense)** | **1.29 MB** | **3.22 GB** | **4.83 GB** | **6.45 GB** |
+| Q2_K (8-bit dense) | 0.98 MB | 2.46 GB | 3.69 GB | 4.92 GB |
+
+The model needs about 7.2 GB otherwise. **Q3_K_S can hold 96 experts per
+layer in RAM with room to spare**, where Q4_K_S has to settle for 64. And
+Q3_K_S moves 24 % less data per miss, so the same hit rate costs less I/O.
+
+### There is no small set of "Norwegian experts"
+
+We added instrumentation to audio.cpp's disk expert cache that counts every
+expert the router asks for, then collected it for one Norwegian sentence:
+
+| Layer | Distinct experts used | Top-8 coverage | Top-64 coverage |
+|---|---|---|---|
+| 0 | 255 of 256 | 8.1 % | 43.0 % |
+| 25 | 202 | 13.8 % | 51.1 % |
+| 39 | 193 | 18.6 % | 51.0 % |
+
+One Norwegian sentence uses **193 to 255 of the 256 experts in every layer**,
+and the top 64 cover only 43–52 % of accesses. The routing distribution is
+broad and flat, not concentrated — which is exactly why the cache hit rate
+scales linearly with cache size.
+
+Comparing the same measurement for English against Norwegian: the top 64
+share **27–33 experts** against 16 by chance. Language specialization is
+real, but it is a gradient, not a partition. There is a shared core
+(phonetics, timing, general language structure) and a language-specific
+periphery.
+
+Two consequences:
+
+- **Per-expert mixed precision** would buy little: only half the accesses
+  would land on a high-precision expert, and it needs runtime changes.
+- **Pinning** the top 64 was implemented and measured. It made the hit rate
+  slightly *worse* (39.3 % against 40.0 % at 32 slots) because the pinned
+  experts fill every slot and leave the LRU part nothing. With a flat
+  distribution, plain LRU is already close to optimal.
+
 ## Measurement method
 
-- **WER**: Whisper `small`, against the reference text, normalized for
-  punctuation and case. Levenshtein distance at word level, divided by
-  reference length.
+- **WER**: `NbAiLab/nb-wav2vec2-1b-bokmaal`, a Norwegian ASR with 6.33 %
+  WER on Norwegian reference material, against the reference text,
+  normalized for punctuation and case. Levenshtein distance at word level,
+  divided by reference length. The earlier figures in this report used
+  Whisper `small` and are superseded.
+- **Reference text**: must match the reference audio. The 8-second clip
+  contains three sentences, and that is what the model is given.
 - **Auto-language**: Whisper without a forced language — the model's own
   assessment of what language the audio is.
 - **F0**: median fundamental frequency via autocorrelation over the first
