@@ -234,6 +234,20 @@
         "type": "string",
         "description": "Path to a file with 'layer expert' lines. Those experts are pinned in the disk expert cache, so their slots are never evicted. Requires disk_experts=true.",
         "required": false
+      },
+      {
+        "name": "expert_read_threads",
+        "type": "int",
+        "description": "Number of threads that read expert weights from disk in parallel. The disk is the bottleneck: with one thread we get ~330 MB/s, with more we approach the drive's queue depth. Requires disk_experts=true.",
+        "required": false,
+        "default": 8
+      },
+      {
+        "name": "drop_expert_cache",
+        "type": "bool",
+        "description": "Discard the expert pages from the page cache right after they are read. The checkpoint is larger than RAM on a 16 GB machine, so without this the page cache fills with the model's pages and macOS evicts everything else (the LLM, Draw Things) instead. Costs some reuse of the pages, keeps the rest of the machine alive.",
+        "required": false,
+        "default": false
       }
     ],
     "load": []
